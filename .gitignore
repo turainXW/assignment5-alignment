@@ -1,7 +1,9 @@
 *.bin
 models/
 data/
-
+sft_outputs/
+wandb/
+eval_results_correct/
 nav
 tags
 

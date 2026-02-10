@@ -1,0 +1,29 @@
+[
+  {
+    "model_name": "size_128",
+    "model_path": "sft_outputs/sft_ds_size_128_lr5e-05_bs2x8",
+    "accuracy": 0.0,
+    "format_accuracy": 0.0,
+    "correct": 0,
+    "has_boxed": 0,
+    "total": 500
+  },
+  {
+    "model_name": "size_256",
+    "model_path": "sft_outputs/sft_ds_size_256_lr5e-05_bs1x16",
+    "accuracy": 0.016,
+    "format_accuracy": 0.416,
+    "correct": 8,
+    "has_boxed": 208,
+    "total": 500
+  },
+  {
+    "model_name": "size_512",
+    "model_path": "sft_outputs/sft_ds_size_512_lr5e-05_bs1x16",
+    "accuracy": 0.058,
+    "format_accuracy": 0.874,
+    "correct": 29,
+    "has_boxed": 437,
+    "total": 500
+  }
+]
