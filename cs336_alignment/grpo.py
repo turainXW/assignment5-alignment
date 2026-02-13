@@ -132,17 +132,41 @@ def get_log_probs_from_model(
     device,
 ):
     from cs336_alignment.sft_tokenize import tokenize_prompt_and_output
-    tokenized=tokenize_prompt_and_output(prompts,responses,tokenizer)
-    input_ids=tokenized["input_ids"].to(device)
-    labels=tokenized["labels"].to(device)
-    response_mask=tokenized["response_mask"].to(device)
+    # Process one sample at a time to avoid OOM with 151K vocab
+    all_log_probs = []
+    all_masks = []
+    max_len = 0
 
-    outputs=model(input_ids=input_ids,labels=labels)
-    logits=outputs.logits
-    log_probs=torch.nn.functional.log_softmax(logits,dim=-1)
-    log_probs_at_labels=log_probs.gather(dim=-1,index=labels.unsqueeze(-1)).squeeze(-1)
-    
-    return log_probs_at_labels,response_mask
+    for i in range(len(prompts)):
+        tokenized = tokenize_prompt_and_output([prompts[i]], [responses[i]], tokenizer)
+        input_ids = tokenized["input_ids"].to(device)
+        labels = tokenized["labels"].to(device)
+        response_mask = tokenized["response_mask"].to(device)
+
+        logits = model(input_ids=input_ids).logits  # Don't pass labels
+        log_probs = torch.log_softmax(logits, dim=-1)
+        safe_labels = labels.clamp(min=0)
+        lp_at_labels = log_probs.gather(-1, safe_labels.unsqueeze(-1)).squeeze(-1)
+
+        all_log_probs.append(lp_at_labels.cpu())
+        all_masks.append(response_mask.cpu())
+        max_len = max(max_len, lp_at_labels.shape[-1])
+
+        del logits, log_probs
+        torch.cuda.empty_cache()
+
+    # Pad to same length and stack
+    padded_lp, padded_m = [], []
+    for lp, m in zip(all_log_probs, all_masks):
+        pad = max_len - lp.shape[-1]
+        if pad > 0:
+            padded_lp.append(torch.cat([lp, torch.zeros(1, pad)], dim=-1))
+            padded_m.append(torch.cat([m, torch.zeros(1, pad)], dim=-1))
+        else:
+            padded_lp.append(lp)
+            padded_m.append(m)
+
+    return torch.cat(padded_lp, dim=0).to(device), torch.cat(padded_m, dim=0).to(device)
 
 def format_r1_zero_prompt(
     prompt:str,
@@ -155,7 +179,7 @@ def format_r1_zero_prompt(
         "and answer are enclosed within <think> </think>and"
         "  <answer> </answer> tags, respectively.\n\n"
         f"User: {prompt}\n\n"
-        f"Assistant: "
+        f"Assistant: <think>\n"
     )
 
 
@@ -216,7 +240,9 @@ def grpo_train_loop(
     is_main = (rank == 0)
 
     # ========== 加载模型 ==========
-    policy = AutoModelForCausalLM.from_pretrained(model_path, torch_dtype=torch.bfloat16)
+    policy = AutoModelForCausalLM.from_pretrained(
+        model_path, torch_dtype=torch.bfloat16, attn_implementation="flash_attention_2"
+    )
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
@@ -225,10 +251,16 @@ def grpo_train_loop(
     with open(ds_config_path, "r") as f:
         ds_config = json.load(f)
 
-    micro_batch_per_gpu = max(train_batch_size // (gradient_accumulation_steps * world_size), 1)
-    ds_config["train_batch_size"] = train_batch_size
+    # Compute batch params from rollout_batch_size
+    micro_batch_per_gpu = 1
+    grad_accum = rollout_batch_size // (micro_batch_per_gpu * world_size)
+    effective_batch = micro_batch_per_gpu * grad_accum * world_size
+    ds_config["train_batch_size"] = effective_batch
     ds_config["train_micro_batch_size_per_gpu"] = micro_batch_per_gpu
-    ds_config["gradient_accumulation_steps"] = gradient_accumulation_steps
+    ds_config["gradient_accumulation_steps"] = grad_accum
+    # Remove scheduler and optimizer from config since we pass our own optimizer
+    ds_config.pop("scheduler", None)
+    ds_config.pop("optimizer", None)
 
     # ========== DeepSpeed 初始化 ==========
     optimizer = torch.optim.AdamW(
@@ -271,7 +303,7 @@ def grpo_train_loop(
             "and then provides the user with the answer. The reasoning process "
             "and answer are enclosed within <think> </think>and "
             "<answer> </answer> tags, respectively.\n\n"
-            f"User: {question}\n\nAssistant:"
+            f"User: {question}\n\nAssistant: <think>\n"
         )
 
     # ========== 主循环 ==========
@@ -293,14 +325,16 @@ def grpo_train_loop(
 
         responses = None
         if is_main:
-            llm = LLM(model=tmp_path, gpu_memory_utilization=0.85, dtype="bfloat16")
+            llm = LLM(model=tmp_path, gpu_memory_utilization=0.5,
+                       dtype="bfloat16", enforce_eager=True, max_model_len=2048)
             vllm_outputs = llm.generate(prompts, sampling_params)
             responses = []
             for output in vllm_outputs:
                 text = output.outputs[0].text
                 if not text.endswith("</answer>"):
                     text += "</answer>"
-                responses.append(text)
+                # Prepend <think>\n since prompt ends with it
+                responses.append("<think>\n" + text)
             del llm
             torch.cuda.empty_cache()
 
@@ -350,20 +384,23 @@ def grpo_train_loop(
 
                 mb_prompts = prompts[mb_start:mb_end]
                 mb_responses = responses[mb_start:mb_end]
-                mb_mask = response_mask[mb_start:mb_end]
                 mb_adv = advantages_tensor[mb_start:mb_end] if advantages_tensor is not None else None
                 mb_raw = rewards_for_loss[mb_start:mb_end] if rewards_for_loss is not None else None
-                mb_old = old_log_probs[mb_start:mb_end] if loss_type == "grpo_clip" else None
 
                 # Forward
                 tokenized = tokenize_prompt_and_output(mb_prompts, mb_responses, tokenizer)
                 input_ids = tokenized["input_ids"].to(device)
                 labels = tokenized["labels"].to(device)
+                mb_mask = tokenized["response_mask"].to(device)
 
                 logits = model_engine(input_ids=input_ids).logits
                 lp = torch.log_softmax(logits, dim=-1)
                 safe_labels = labels.clamp(min=0)
                 mb_log_probs = lp.gather(dim=-1, index=safe_labels.unsqueeze(-1)).squeeze(-1)
+
+                # Trim old_log_probs to match current tokenization length
+                cur_len = mb_log_probs.shape[-1]
+                mb_old = old_log_probs[mb_start:mb_end, :cur_len] if loss_type == "grpo_clip" else None
 
                 # 计算 loss
                 per_token_loss, stats = compute_policy_gradient_loss(
@@ -390,7 +427,8 @@ def grpo_train_loop(
         if step % 5 == 0:
             save_ds_model_for_vllm(model_engine, tokenizer, tmp_path)
             if is_main:
-                val_llm = LLM(model=tmp_path, gpu_memory_utilization=0.85, dtype="bfloat16")
+                val_llm = LLM(model=tmp_path, gpu_memory_utilization=0.5,
+                              dtype="bfloat16", enforce_eager=True, max_model_len=2048)
                 n_val = min(1024, len(val_dataset))
                 val_prompts = [_make_prompt(_extract_question(ex["prompt"]))
                                for ex in val_dataset[:n_val]]
@@ -398,7 +436,7 @@ def grpo_train_loop(
                 val_outputs = val_llm.generate(val_prompts, sampling_params)
                 correct = sum(
                     r1_zero_reward_fn(
-                        vo.outputs[0].text + ("" if vo.outputs[0].text.endswith("</answer>") else "</answer>"),
+                        "<think>\n" + vo.outputs[0].text + ("" if vo.outputs[0].text.endswith("</answer>") else "</answer>"),
                         vg
                     )["reward"]
                     for vo, vg in zip(val_outputs, val_gts)
@@ -444,7 +482,7 @@ def parse_args():
     parser.add_argument("--sampling_max_tokens", type=int, default=512)
 
     # DeepSpeed
-    parser.add_argument("--ds_config_path", type=str, default="ds_config_zero2.json")
+    parser.add_argument("--ds_config_path", type=str, default="cs336_alignment/ds_config.json")
     parser.add_argument("--local_rank", type=int, default=-1,
                         help="DeepSpeed 自动传入，不需要手动设置")
 
