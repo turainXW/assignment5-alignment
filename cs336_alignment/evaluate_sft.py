@@ -8,21 +8,22 @@ import json
 from pathlib import Path
 
 import torch
+import transformers
 from transformers import AutoTokenizer
 from vllm import LLM, SamplingParams
 
+# Monkey-patch for Qwen2Tokenizer compatibility with vLLM
+from transformers import Qwen2Tokenizer
+if not hasattr(Qwen2Tokenizer, "all_special_tokens_extended"):
+    Qwen2Tokenizer.all_special_tokens_extended = property(lambda self: [])
+
 from cs336_alignment.drgrpo_grader import r1_zero_reward_fn
+from cs336_alignment.trl_grpo_data import PROMPT_TEMPLATE
 
 
 def format_r1_zero_prompt(problem: str) -> str:
-    """Format problem for R1-Zero style evaluation"""
-    return (
-        "A conversation between User and Assistant. The user asks a question, and the Assistant solves it. "
-        "The assistant first thinks about the reasoning process in the mind and then provides the user with the answer. "
-        "The reasoning process and answer are enclosed within <thought> and <answer> tags, respectively.\n"
-        f"User: {problem}\n"
-        "Assistant: <thought>\n"
-    )
+    """Format problem for R1-Zero style evaluation using the same template as training."""
+    return PROMPT_TEMPLATE.format(question=problem)
 
 
 def load_eval_data(data_path: str, max_samples: int = None):

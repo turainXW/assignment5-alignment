@@ -7,11 +7,19 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from vllm import LLM, SamplingParams
 from cs336_alignment.sft_tokenize import tokenize_prompt_and_output
 
+# Monkey-patch for Qwen2Tokenizer compatibility with vLLM
+from transformers import Qwen2Tokenizer
+if not hasattr(Qwen2Tokenizer, "all_special_tokens_extended"):
+    Qwen2Tokenizer.all_special_tokens_extended = property(lambda self: [])
+
 import deepspeed
 import torch.distributed as dist
 import os
 import pickle
 import argparse
+import subprocess
+import sys
+import tempfile
 
 def compute_group_normalized_rewards(
         reward_fn:Callable[[str,str],dict[str,float]],
@@ -211,6 +219,58 @@ def save_ds_model_for_vllm(model_engine, tokenizer, path):
     dist.barrier()
 
 
+def generate_with_vllm_subprocess(model_path, prompts, sampling_params_dict, gpu_id=0):
+    """Run vLLM generation in a separate subprocess to avoid NCCL conflicts with DeepSpeed."""
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+        json.dump({
+            'prompts': prompts,
+            'sampling_params': sampling_params_dict,
+            'model_path': model_path,
+        }, f)
+        input_file = f.name
+    output_file = input_file + '.out'
+
+    script = f'''
+import json, os
+os.environ["CUDA_VISIBLE_DEVICES"] = "{gpu_id}"
+from transformers import Qwen2Tokenizer
+if not hasattr(Qwen2Tokenizer, "all_special_tokens_extended"):
+    Qwen2Tokenizer.all_special_tokens_extended = property(lambda self: [])
+from vllm import LLM, SamplingParams
+with open("{input_file}") as f:
+    data = json.load(f)
+llm = LLM(model=data["model_path"], gpu_memory_utilization=0.5,
+          dtype="bfloat16", enforce_eager=True, max_model_len=2048)
+sp = SamplingParams(**data["sampling_params"])
+outputs = llm.generate(data["prompts"], sp)
+responses = [o.outputs[0].text for o in outputs]
+with open("{output_file}", "w") as f:
+    json.dump(responses, f)
+'''
+    # Use a clean env without MASTER_ADDR/MASTER_PORT/RANK/WORLD_SIZE/LOCAL_RANK
+    clean_env = {k: v for k, v in os.environ.items()
+                 if k not in ("MASTER_ADDR", "MASTER_PORT", "RANK", "WORLD_SIZE",
+                              "LOCAL_RANK", "LOCAL_WORLD_SIZE", "GROUP_RANK",
+                              "CROSS_RANK", "CROSS_SIZE")}
+    clean_env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True, text=True, env=clean_env,
+    )
+    if result.returncode != 0:
+        print(f"vLLM subprocess stderr:\n{result.stderr[-2000:]}")
+        raise RuntimeError(f"vLLM subprocess failed with code {result.returncode}")
+
+    with open(output_file) as f:
+        responses = json.load(f)
+
+    # Cleanup temp files
+    os.unlink(input_file)
+    os.unlink(output_file)
+    return responses
+
+
 def grpo_train_loop(
     model_path: str,
     train_dataset_path: str,
@@ -283,28 +343,14 @@ def grpo_train_loop(
     log = {"steps": [], "losses": [], "grad_norms": [], "train_rewards": [], "val_rewards": []}
     data_idx = 0
     tmp_path = "/tmp/grpo_policy_ds"
-    sampling_params = SamplingParams(
-        temperature=sampling_temperature, max_tokens=sampling_max_tokens,
-        min_tokens=sampling_min_tokens, stop=["</answer>"],
-    )
-
-    def _extract_question(prompt_field):
-        return prompt_field.replace("Question: ", "").replace("\n\nAnswer:", "").strip()
 
     def _extract_gt(response_field):
+        """Extract ground truth from R1 format (<answer> tags) or fallback to \\boxed{}."""
+        if "<answer>" in response_field and "</answer>" in response_field:
+            answer = response_field.split("<answer>")[-1].replace("</answer>", "").strip()
+            return answer
         boxed = extract_boxed_answer(response_field)
         return boxed if boxed else response_field
-
-    def _make_prompt(question):
-        return (
-            "A conversation between User and Assistant. "
-            "The user asks a question, and the Assistant solves it. "
-            "The assistant first thinks about the reasoning process in the mind "
-            "and then provides the user with the answer. The reasoning process "
-            "and answer are enclosed within <think> </think>and "
-            "<answer> </answer> tags, respectively.\n\n"
-            f"User: {question}\n\nAssistant: <think>\n"
-        )
 
     # ========== 主循环 ==========
     for step in range(n_epochs):
@@ -313,9 +359,8 @@ def grpo_train_loop(
         for i in range(n_prompts_per_rollout):
             example = train_dataset[data_idx % len(train_dataset)]
             data_idx += 1
-            question = _extract_question(example["prompt"])
+            p = example["prompt"]  # R1 format: already includes system instruction + "Assistant: <think>"
             gt = _extract_gt(example["response"])
-            p = _make_prompt(question)
             for _ in range(group_size):
                 prompts.append(p)
                 ground_truths.append(gt)
@@ -323,19 +368,32 @@ def grpo_train_loop(
         # ------ vLLM Rollout（仅 rank 0 生成，广播给所有 rank）------
         save_ds_model_for_vllm(model_engine, tokenizer, tmp_path)
 
+        # Offload model to CPU on rank 0 to free GPU memory for vLLM
+        if is_main:
+            model_engine.module.cpu()
+            torch.cuda.empty_cache()
+
         responses = None
         if is_main:
-            llm = LLM(model=tmp_path, gpu_memory_utilization=0.5,
-                       dtype="bfloat16", enforce_eager=True, max_model_len=2048)
-            vllm_outputs = llm.generate(prompts, sampling_params)
+            sp_dict = {
+                "temperature": sampling_temperature,
+                "max_tokens": sampling_max_tokens,
+                "min_tokens": sampling_min_tokens,
+                "stop": ["</answer>"],
+            }
+            raw_texts = generate_with_vllm_subprocess(
+                tmp_path, prompts, sp_dict, gpu_id=local_rank,
+            )
             responses = []
-            for output in vllm_outputs:
-                text = output.outputs[0].text
+            for text in raw_texts:
                 if not text.endswith("</answer>"):
                     text += "</answer>"
-                # Prepend <think>\n since prompt ends with it
+                # Prepend <think>\n since prompt ends with <think>
                 responses.append("<think>\n" + text)
-            del llm
+
+        # Reload model back to GPU on rank 0
+        if is_main:
+            model_engine.module.to(device)
             torch.cuda.empty_cache()
 
         responses = broadcast_object(responses, src=0)
@@ -427,24 +485,35 @@ def grpo_train_loop(
         if step % 5 == 0:
             save_ds_model_for_vllm(model_engine, tokenizer, tmp_path)
             if is_main:
-                val_llm = LLM(model=tmp_path, gpu_memory_utilization=0.5,
-                              dtype="bfloat16", enforce_eager=True, max_model_len=2048)
+                # Offload model to CPU to free GPU memory for vLLM
+                model_engine.module.cpu()
+                torch.cuda.empty_cache()
+
                 n_val = min(1024, len(val_dataset))
-                val_prompts = [_make_prompt(_extract_question(ex["prompt"]))
-                               for ex in val_dataset[:n_val]]
+                val_prompts = [ex["prompt"] for ex in val_dataset[:n_val]]
                 val_gts = [_extract_gt(ex["response"]) for ex in val_dataset[:n_val]]
-                val_outputs = val_llm.generate(val_prompts, sampling_params)
+                sp_dict = {
+                    "temperature": sampling_temperature,
+                    "max_tokens": sampling_max_tokens,
+                    "min_tokens": sampling_min_tokens,
+                    "stop": ["</answer>"],
+                }
+                val_texts = generate_with_vllm_subprocess(
+                    tmp_path, val_prompts, sp_dict, gpu_id=local_rank,
+                )
                 correct = sum(
                     r1_zero_reward_fn(
-                        "<think>\n" + vo.outputs[0].text + ("" if vo.outputs[0].text.endswith("</answer>") else "</answer>"),
+                        "<think>\n" + vt + ("" if vt.endswith("</answer>") else "</answer>"),
                         vg
                     )["reward"]
-                    for vo, vg in zip(val_outputs, val_gts)
+                    for vt, vg in zip(val_texts, val_gts)
                 )
                 val_reward = correct / n_val
                 log["val_rewards"].append(val_reward)
                 print(f"  val_reward={val_reward:.3f}")
-                del val_llm
+
+                # Reload model back to GPU
+                model_engine.module.to(device)
                 torch.cuda.empty_cache()
             dist.barrier()
 

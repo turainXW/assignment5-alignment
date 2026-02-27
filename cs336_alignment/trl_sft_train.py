@@ -6,17 +6,16 @@ import json
 
 from datasets import Dataset
 from transformers import AutoTokenizer
-from trl import DataCollatorForCompletionOnlyLM, SFTConfig, SFTTrainer
+from trl import SFTConfig, SFTTrainer
 
 
 def load_r1_dataset(path: str) -> Dataset:
-    """Load R1-format JSONL and return HF Dataset with 'text' column."""
+    """Load R1-format JSONL and return HF Dataset with prompt-completion columns."""
     records = []
     with open(path) as f:
         for line in f:
             ex = json.loads(line)
-            # Concatenate prompt + response into single text field
-            records.append({"text": ex["prompt"] + ex["response"]})
+            records.append({"prompt": ex["prompt"], "completion": ex["response"]})
     return Dataset.from_list(records)
 
 
@@ -60,13 +59,6 @@ def main():
     eval_dataset = load_r1_dataset(args.val_data)
     print(f"Train: {len(train_dataset)} examples, Eval: {len(eval_dataset)} examples")
 
-    # Data collator: only compute loss on completion (after "Assistant: <think>")
-    response_template = "Assistant: <think>"
-    collator = DataCollatorForCompletionOnlyLM(
-        response_template=response_template,
-        tokenizer=tokenizer,
-    )
-
     # Training config
     training_args = SFTConfig(
         output_dir=args.output_dir,
@@ -76,13 +68,13 @@ def main():
         per_device_train_batch_size=args.per_device_train_batch_size,
         per_device_eval_batch_size=args.per_device_train_batch_size,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
-        max_seq_length=args.max_seq_length,
+        max_length=args.max_seq_length,
         max_grad_norm=args.max_grad_norm,
         warmup_ratio=args.warmup_ratio,
         bf16=True,
         gradient_checkpointing=args.gradient_checkpointing,
         deepspeed=args.deepspeed,
-        dataset_text_field="text",
+        completion_only_loss=True,
         report_to=args.report_to,
         logging_steps=args.logging_steps,
         eval_strategy="steps",
@@ -103,7 +95,6 @@ def main():
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
-        data_collator=collator,
         processing_class=tokenizer,
     )
 

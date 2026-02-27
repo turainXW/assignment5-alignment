@@ -28,7 +28,6 @@ def parse_args():
     parser.add_argument("--gradient_accumulation_steps", type=int, default=16)
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--max_completion_length", type=int, default=1024)
-    parser.add_argument("--max_prompt_length", type=int, default=512)
     parser.add_argument("--num_iterations", type=int, default=1)
     parser.add_argument("--beta", type=float, default=0.0)
     parser.add_argument("--epsilon", type=float, default=0.2)
@@ -39,8 +38,11 @@ def parse_args():
                         help="Path to DeepSpeed config JSON (e.g. cs336_alignment/ds_zero2_trl.json)")
     parser.add_argument("--gradient_checkpointing", action="store_true", default=False)
 
-    # vLLM (disabled by default — all GPUs used for training)
+    # vLLM
     parser.add_argument("--use_vllm", action="store_true", default=False)
+    parser.add_argument("--vllm_mode", type=str, default="colocate",
+                        choices=["server", "colocate"])
+    parser.add_argument("--vllm_gpu_memory_utilization", type=float, default=0.3)
     parser.add_argument("--vllm_server_host", type=str, default="0.0.0.0")
     parser.add_argument("--vllm_server_port", type=int, default=8000)
     parser.add_argument("--vllm_server_timeout", type=float, default=300.0)
@@ -74,7 +76,6 @@ def main():
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         temperature=args.temperature,
         max_completion_length=args.max_completion_length,
-        max_prompt_length=args.max_prompt_length,
         num_iterations=args.num_iterations,
         beta=args.beta,
         scale_rewards=True,
@@ -87,6 +88,8 @@ def main():
         gradient_checkpointing=args.gradient_checkpointing,
         deepspeed=args.deepspeed,
         use_vllm=args.use_vllm,
+        vllm_mode=args.vllm_mode,
+        vllm_gpu_memory_utilization=args.vllm_gpu_memory_utilization,
         vllm_server_host=args.vllm_server_host,
         vllm_server_port=args.vllm_server_port,
         vllm_server_timeout=args.vllm_server_timeout,
@@ -101,7 +104,6 @@ def main():
         # Let TRL handle model loading
         model_init_kwargs={
             "torch_dtype": "bfloat16",
-            "attn_implementation": "flash_attention_2",
         },
     )
 

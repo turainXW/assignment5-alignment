@@ -15,7 +15,7 @@ ACCELERATE="${VENV}/bin/accelerate"
 export WANDB_API_KEY="${WANDB_API_KEY:-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}"
 
 # Defaults
-MODEL_PATH="${SCRIPT_DIR}/data/sft_ds_size_full_lr5e-05_bs1x16"
+MODEL_PATH="${SCRIPT_DIR}/data/a5-alignment/models/Qwen2.5-Math-1.5B"
 TRAIN_DATA="${SCRIPT_DIR}/data/MATH/math_train_r1.jsonl"
 VAL_DATA="${SCRIPT_DIR}/data/MATH/math_test_r1.jsonl"
 OUTPUT_DIR="${SCRIPT_DIR}/data/sft_r1_format"
@@ -59,8 +59,8 @@ $ACCELERATE launch \
     --gradient_checkpointing \
     --num_train_epochs 2 \
     --learning_rate 2e-5 \
-    --per_device_train_batch_size 4 \
-    --gradient_accumulation_steps 4 \
+    --per_device_train_batch_size 1 \
+    --gradient_accumulation_steps 16 \
     "$@"
 
 echo "R1 SFT training complete! Model saved to ${OUTPUT_DIR}"

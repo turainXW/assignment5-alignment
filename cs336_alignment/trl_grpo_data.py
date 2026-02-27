@@ -29,9 +29,16 @@ def _extract_question(prompt_field: str) -> str:
 
 
 def _extract_ground_truth(response_field: str) -> str:
-    """Extract the boxed answer from the response; fall back to raw response."""
+    """Extract answer from <answer> tags (R1 format) or \\boxed{} (standard format)."""
+    if "<answer>" in response_field and "</answer>" in response_field:
+        return response_field.split("<answer>")[-1].replace("</answer>", "").strip()
     boxed = extract_boxed_answer(response_field)
     return boxed if boxed else response_field
+
+
+def _is_r1_format(prompt_field: str) -> bool:
+    """Check if the prompt is already in R1 format (contains 'Assistant: <think>')."""
+    return "Assistant: <think>" in prompt_field
 
 
 def load_math_dataset(path: str) -> Dataset:
@@ -45,9 +52,14 @@ def load_math_dataset(path: str) -> Dataset:
     with open(path) as f:
         for line in f:
             example = json.loads(line)
-            question = _extract_question(example["prompt"])
             ground_truth = _extract_ground_truth(example["response"])
-            prompt = PROMPT_TEMPLATE.format(question=question)
+            if _is_r1_format(example["prompt"]):
+                # R1 format: prompt already includes system instruction + "Assistant: <think>"
+                prompt = example["prompt"]
+            else:
+                # Standard format: wrap with PROMPT_TEMPLATE
+                question = _extract_question(example["prompt"])
+                prompt = PROMPT_TEMPLATE.format(question=question)
             records.append({"prompt": prompt, "ground_truth": ground_truth})
 
     return Dataset.from_list(records)
