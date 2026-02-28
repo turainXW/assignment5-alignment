@@ -1,0 +1,47 @@
+[
+  {
+    "model_path": "data/sft_r1_format",
+    "total": 500,
+    "answer_correct": 175,
+    "format_correct": 423,
+    "answer_accuracy": 0.35,
+    "format_accuracy": 0.846,
+    "name": "SFT R1 Base"
+  },
+  {
+    "model_path": "data/trl_grpo_output/checkpoint-50",
+    "total": 500,
+    "answer_correct": 187,
+    "format_correct": 456,
+    "answer_accuracy": 0.374,
+    "format_accuracy": 0.912,
+    "name": "GRPO Step 50"
+  },
+  {
+    "model_path": "data/trl_grpo_output/checkpoint-100",
+    "total": 500,
+    "answer_correct": 194,
+    "format_correct": 462,
+    "answer_accuracy": 0.388,
+    "format_accuracy": 0.924,
+    "name": "GRPO Step 100"
+  },
+  {
+    "model_path": "data/trl_grpo_output/checkpoint-150",
+    "total": 500,
+    "answer_correct": 207,
+    "format_correct": 474,
+    "answer_accuracy": 0.414,
+    "format_accuracy": 0.948,
+    "name": "GRPO Step 150"
+  },
+  {
+    "model_path": "data/trl_grpo_output/checkpoint-200",
+    "total": 500,
+    "answer_correct": 199,
+    "format_correct": 469,
+    "answer_accuracy": 0.398,
+    "format_accuracy": 0.938,
+    "name": "GRPO Step 200"
+  }
+]

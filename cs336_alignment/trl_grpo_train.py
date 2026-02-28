@@ -50,6 +50,7 @@ def parse_args():
     # Logging / eval
     parser.add_argument("--logging_steps", type=int, default=1)
     parser.add_argument("--eval_steps", type=int, default=5)
+    parser.add_argument("--eval_strategy", type=str, default="steps")
     parser.add_argument("--save_steps", type=int, default=50)
     parser.add_argument("--report_to", type=str, default="wandb")
     parser.add_argument("--log_completions", action="store_true", default=False)
@@ -95,10 +96,11 @@ def main():
         vllm_server_timeout=args.vllm_server_timeout,
         report_to=args.report_to,
         logging_steps=args.logging_steps,
-        eval_strategy="steps",
+        eval_strategy=args.eval_strategy,
         eval_steps=args.eval_steps,
         save_strategy="steps",
         save_steps=args.save_steps,
+        save_only_model=True,
         log_completions=args.log_completions,
         seed=42,
         # Let TRL handle model loading
