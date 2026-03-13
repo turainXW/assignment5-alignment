@@ -6,6 +6,8 @@ wandb/
 eval_results_correct/
 eval_results/base/
 eval_results/sft/
+eval_results/full_comparison_500.json
+eval_results/r1_prompt_eval.json
 nav
 tags
 
