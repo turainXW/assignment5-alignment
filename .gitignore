@@ -4,6 +4,8 @@ data/
 sft_outputs/
 wandb/
 eval_results_correct/
+eval_results/base/
+eval_results/sft/
 nav
 tags
 

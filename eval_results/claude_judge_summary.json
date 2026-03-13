@@ -1,0 +1,6 @@
+{
+  "alpaca_base_winrate": 0.4472049689440994,
+  "alpaca_sft_winrate": 0.17763975155279504,
+  "sst_base_safe_rate": 0.74,
+  "sst_sft_safe_rate": 0.36
+}

@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(.venv/bin/python -c \"\nfrom cs336_alignment.trl_grpo_data import load_math_dataset\nfrom cs336_alignment.trl_grpo_reward import math_reward_func\n\n# Test data loader\nds = load_math_dataset\\('data/MATH/math_train.jsonl'\\)\nprint\\(f'Train dataset: {len\\(ds\\)} examples'\\)\nprint\\(f'Columns: {ds.column_names}'\\)\nprint\\(f'Sample prompt \\(first 200 chars\\): {ds[0][\\\\\"prompt\\\\\"][:200]}'\\)\nprint\\(f'Sample ground_truth: {ds[0][\\\\\"ground_truth\\\\\"]}'\\)\n\n# Test reward function\n# Simulate a correct response\ntest_prompt = ds[0]['prompt']\ntest_gt = ds[0]['ground_truth']\ncorrect_completion = f' The answer is clearly {test_gt}. </think> <answer> {test_gt} </answer>'\nwrong_completion = ' I dont know </think> <answer> 999999 </answer>'\nbad_format = ' just some random text without proper tags'\n\nr1 = math_reward_func\\([test_prompt], [correct_completion], ground_truth=[test_gt]\\)\nr2 = math_reward_func\\([test_prompt], [wrong_completion], ground_truth=[test_gt]\\)\nr3 = math_reward_func\\([test_prompt], [bad_format], ground_truth=[test_gt]\\)\nprint\\(f'Correct reward: {r1}'\\)\nprint\\(f'Wrong reward: {r2}'\\)\nprint\\(f'Bad format reward: {r3}'\\)\n\" 2>&1)",
+      "Bash(kill -9 80821 80822 80823 80824 80662 80654 2>/dev/null; sleep 2; ps aux | grep -E \"trl_grpo|accelerate\" | grep -v grep)",
+      "Bash(echo \"=== Batch math verification ===\" && python3 -c \"\nper_device=8; num_gpus=3; gas=16; num_gens=8\nglobal_batch = per_device * num_gpus\neffective = global_batch * gas\nprint\\(f'per_device={per_device}, num_gpus={num_gpus}, gas={gas}'\\)\nprint\\(f'global_batch = {global_batch}'\\)\nprint\\(f'global_batch % num_gens = {global_batch % num_gens} \\(must be 0\\)'\\)\nprint\\(f'effective_batch = {effective}'\\)\nprint\\(f'prompts_per_step = {effective // num_gens}'\\)\nprint\\(\\)\nprint\\('OK!' if global_batch % num_gens == 0 else 'ERROR: not divisible!'\\)\n\")",
+      "Bash(nvidia-smi:*)",
+      "Bash(pkill:*)",
+      "Bash(/cs336/assignment5-alignment/.venv/bin/python:*)",
+      "Bash(pip show:*)",
+      "Bash(pip install:*)",
+      "Bash(/cs336/assignment5-alignment/.venv/bin/pip install:*)",
+      "Bash(apt-get install:*)",
+      "Bash(.venv/bin/python:*)",
+      "Bash(ls -la /mnt/cs336/assignment5-alignment/scripts/*.py /mnt/cs336/assignment5-alignment/scripts/*.sh 2>/dev/null | grep -E \"download_sft|prepare_verl|run_verl\")",
+      "Bash(source .venv/bin/activate && pip install verl 2>&1 | tail -20)",
+      "Bash(grep \"step:\" logs/verl_sft.log | sed 's/.*step:\\\\\\([0-9]*\\\\\\).*train\\\\/loss:\\\\\\([0-9.]*\\\\\\).*/\\\\1 \\\\2/' | python3 -c \"\nimport sys\ndata = [line.split\\(\\) for line in sys.stdin if len\\(line.split\\(\\)\\)==2]\nw = 100  # 100步滑动平均\nlosses = [float\\(x[1]\\) for x in data]\nsteps = [int\\(x[0]\\) for x in data]\nfor i in range\\(0, len\\(losses\\)-w, 100\\):\n    avg = sum\\(losses[i:i+w]\\)/w\n    print\\(f'step={steps[i+w//2]:<5} avg_loss={avg:.4f}'\\)\n\")"
+    ]
+  }
+}
